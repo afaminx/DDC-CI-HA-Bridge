@@ -19,7 +19,7 @@ This tool provides an easy way to automatically adjust your monitor brightness b
 
 ## Setup
 
-1. Download or build `DDC-CI HA-Bridge.exe`.
+1. Download the latest release from the [Releases page](https://github.com/afaminx/DDC-CI-HA-Bridge/releases), or build `DDC-CI HA-Bridge.exe` yourself.
 2. Start the app and open `Settings > Home Assistant...`.
 3. Enter your Home Assistant host as `IP:port`, for example `192.168.3.134:8123`.
 4. Enter the sensor entity ID, for example `sensor.office_illuminance`.
