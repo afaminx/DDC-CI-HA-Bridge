@@ -3,7 +3,7 @@ namespace SolarMonitorBrightness;
 public partial class Form1 : Form
 {
     private const string AppTitle = "DDC/CI HA-Bridge";
-    private const string AppVersion = "1.2";
+    private const string AppVersion = "1.3";
 
     private readonly bool _startHidden;
     private readonly HomeAssistantClient _homeAssistant = new();
@@ -59,6 +59,8 @@ public partial class Form1 : Form
         Text = AppTitle;
         Icon = _appIcon;
         ClientSize = new Size(500, 300);
+        FormBorderStyle = FormBorderStyle.FixedSingle;
+        MaximizeBox = false;
         StartPosition = FormStartPosition.CenterScreen;
 
         _notifyIcon = new NotifyIcon(components)
@@ -70,40 +72,21 @@ public partial class Form1 : Form
         };
         _notifyIcon.DoubleClick += (_, _) => ShowFromTray();
 
-        var menu = new MenuStrip();
-        var settingsMenu = new ToolStripMenuItem("Settings");
-        settingsMenu.DropDownItems.Add("Home Assistant...", null, (_, _) => ShowHomeAssistantSettings());
-        settingsMenu.DropDownItems.Add("Brightness control...", null, (_, _) => ShowBrightnessSettings());
-        menu.Items.Add(settingsMenu);
-        MainMenuStrip = menu;
-
         _mainLayout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             ColumnCount = 1,
-            RowCount = 3,
-            Padding = new Padding(14, menu.Height + 14, 14, 14)
+            RowCount = 2,
+            Padding = new Padding(14)
         };
         _mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         _mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-        _mainLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
 
-        var title = new Label
-        {
-            Text = AppTitle,
-            Font = new Font(Font.FontFamily, 14, FontStyle.Bold),
-            AutoSize = true,
-            Margin = new Padding(0, 0, 0, 10)
-        };
-
-        _mainLayout.Controls.Add(title, 0, 0);
-        _mainLayout.Controls.Add(BuildTabs(), 0, 1);
-        _mainLayout.Controls.Add(BuildButtonRow(), 0, 2);
+        _mainLayout.Controls.Add(BuildTabs(), 0, 0);
+        _mainLayout.Controls.Add(BuildButtonRow(), 0, 1);
         Controls.Add(_mainLayout);
-        Controls.Add(menu);
-        menu.BringToFront();
         UpdateToggleButton();
         FitWindowToContent();
     }
@@ -134,11 +117,16 @@ public partial class Form1 : Form
         var statusPage = new TabPage("Status") { Padding = new Padding(10) };
         statusPage.Controls.Add(BuildStatusPanel());
 
+        var settingsPage = new TabPage("Settings") { Padding = new Padding(10) };
+        settingsPage.Controls.Add(BuildSettingsPanel());
+
         var aboutPage = new TabPage("About") { Padding = new Padding(10) };
         aboutPage.Controls.Add(BuildAboutPanel());
 
         tabs.TabPages.Add(statusPage);
+        tabs.TabPages.Add(settingsPage);
         tabs.TabPages.Add(aboutPage);
+        tabs.SelectedIndex = 0;
         return tabs;
     }
 
@@ -168,13 +156,6 @@ public partial class Form1 : Form
             ColumnCount = 1
         };
 
-        panel.Controls.Add(new Label
-        {
-            Text = AppTitle,
-            Font = new Font(Font.FontFamily, 10, FontStyle.Bold),
-            AutoSize = true,
-            Margin = new Padding(0, 0, 0, 8)
-        });
         panel.Controls.Add(new Label { Text = $"Software version: {AppVersion}", AutoSize = true });
         panel.Controls.Add(new Label { Text = "License: MIT License", AutoSize = true });
         panel.Controls.Add(new Label { Text = "Copyright (c) 2026", AutoSize = true });
@@ -194,6 +175,27 @@ public partial class Form1 : Form
         };
         panel.Controls.Add(link);
 
+        return panel;
+    }
+
+    private Control BuildSettingsPanel()
+    {
+        var panel = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false
+        };
+
+        var homeAssistantButton = new Button { Text = "Home Assistant...", AutoSize = true };
+        homeAssistantButton.Click += (_, _) => ShowHomeAssistantSettings();
+
+        var brightnessButton = new Button { Text = "Brightness control...", AutoSize = true };
+        brightnessButton.Click += (_, _) => ShowBrightnessSettings();
+
+        panel.Controls.Add(homeAssistantButton);
+        panel.Controls.Add(brightnessButton);
         return panel;
     }
 
@@ -434,7 +436,7 @@ public partial class Form1 : Form
             preferredContentSize.Height);
 
         ClientSize = clientSize;
-        MinimumSize = SizeFromClientSize(clientSize);
+        LockWindowSize(clientSize);
     }
 
     private void EnsureWindowFitsContent()
@@ -445,11 +447,19 @@ public partial class Form1 : Form
             Math.Max(500, preferredContentSize.Width),
             preferredContentSize.Height);
 
-        MinimumSize = SizeFromClientSize(clientSize);
         if (ClientSize.Width < clientSize.Width || ClientSize.Height < clientSize.Height)
         {
+            MaximumSize = Size.Empty;
             ClientSize = clientSize;
         }
+        LockWindowSize(ClientSize);
+    }
+
+    private void LockWindowSize(Size clientSize)
+    {
+        var fixedSize = SizeFromClientSize(clientSize);
+        MinimumSize = fixedSize;
+        MaximumSize = fixedSize;
     }
 
     private static void FitDialogToContent(Form dialog, Control body, Control buttons, int minimumWidth)
