@@ -1,0 +1,11 @@
+DDC/CI HA-Bridge 1.2
+
+Author: planetenexpress.de
+Website: https://planetenexpress.de
+License: MIT License
+Copyright: 2026 planetenexpress.de
+
+This release contains:
+- Binary Release: Windows executable
+- src: source files used to build this release
+- LICENSE.txt: MIT license text
