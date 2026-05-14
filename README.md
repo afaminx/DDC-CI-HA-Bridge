@@ -6,12 +6,14 @@ Adaptive screen brightness is common on nearly all modern mobile devices, but it
 
 This tool provides an easy way to automatically adjust your monitor brightness based on the illuminance of your environment.
 
-![Screenshot](screenshot.png)
+
+<img src="/screenshots/main.png" alt="main-window" width="50%">
+<img src="/screenshots/curve-editor.png" alt="curve-editor" width="50%">
 
 ## Features
 
 - Reads a numeric Home Assistant sensor, for example `sensor.office_illuminance`
-- Maps numeric (lux) values to monitor brightness from 1 to 100 percent
+- Maps numeric (lux) values to monitor specific brightness from 1 to 100 percent
 - Controls all detected DDC/CI-capable monitors
 - Runs in the Windows system tray
 - Supports optional startup with Windows
