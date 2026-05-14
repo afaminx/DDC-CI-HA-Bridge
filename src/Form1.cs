@@ -1,25 +1,39 @@
+using Microsoft.Win32;
+
 namespace SolarMonitorBrightness;
 
 public partial class Form1 : Form
 {
     private const string AppTitle = "DDC/CI HA-Bridge";
-    private const string AppVersion = "1.4";
+    internal const string AppVersion = "1.5";
 
     private readonly bool _startHidden;
     private readonly HomeAssistantClient _homeAssistant = new();
+    private readonly GitHubUpdateChecker _updateChecker = new();
     private readonly SemaphoreSlim _pollLock = new(1, 1);
     private readonly System.Windows.Forms.Timer _pollTimer = new();
     private readonly Icon _appIcon = AppIconFactory.Create();
+    private readonly List<CurveEditorControl> _openCurveEditors = [];
 
     private AppSettings _settings = AppSettings.Load();
     private NotifyIcon _notifyIcon = null!;
     private bool _exitRequested;
+    private bool _updatingSettingsControls;
+    private decimal? _currentLux;
 
     private readonly Label _luxStatusLabel = new();
     private readonly Label _brightnessStatusLabel = new();
     private readonly Label _monitorStatusLabel = new();
     private readonly Label _messageStatusLabel = new();
     private readonly Button _toggleButton = new();
+    private readonly CheckBox _enabledSettingsBox = new();
+    private readonly CheckBox _startupSettingsBox = new();
+    private readonly CheckBox _startMinimizedSettingsBox = new();
+    private readonly CheckBox _checkUpdatesBox = new();
+    private readonly List<Button> _tabButtons = [];
+    private readonly List<Control> _tabPages = [];
+    private Panel _tabContentPanel = null!;
+    private int _selectedTabIndex;
     private TableLayoutPanel _mainLayout = null!;
 
     public Form1(bool startHidden)
@@ -29,7 +43,11 @@ public partial class Form1 : Form
         BuildUserInterface();
 
         _pollTimer.Tick += async (_, _) => await PollAndApplyAsync();
-        Load += (_, _) => RestartTimer();
+        Load += (_, _) =>
+        {
+            RestartTimer();
+            _ = CheckForUpdatesOnStartupAsync();
+        };
         Shown += (_, _) =>
         {
             if (_startHidden)
@@ -49,9 +67,12 @@ public partial class Form1 : Form
         {
             _pollTimer.Stop();
             _homeAssistant.Dispose();
+            _updateChecker.Dispose();
             _pollLock.Dispose();
             _appIcon.Dispose();
+            SystemEvents.UserPreferenceChanged -= HandleUserPreferenceChanged;
         };
+        SystemEvents.UserPreferenceChanged += HandleUserPreferenceChanged;
     }
 
     private void BuildUserInterface()
@@ -87,6 +108,8 @@ public partial class Form1 : Form
         _mainLayout.Controls.Add(BuildTabs(), 0, 0);
         _mainLayout.Controls.Add(BuildButtonRow(), 0, 1);
         Controls.Add(_mainLayout);
+        ApplyTheme();
+        SyncSettingsControls();
         UpdateToggleButton();
         FitWindowToContent();
     }
@@ -105,49 +128,122 @@ public partial class Form1 : Form
         return menu;
     }
 
-    private TabControl BuildTabs()
+    private void HandleUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
     {
-        var tabs = new TabControl
+        if (e.Category is UserPreferenceCategory.General or UserPreferenceCategory.Color)
+        {
+            ApplyTheme();
+        }
+    }
+
+    private void ApplyTheme()
+    {
+        if (_notifyIcon?.ContextMenuStrip is { } menu)
+        {
+            ThemeManager.Apply(this, menu);
+        }
+        else
+        {
+            ThemeManager.Apply(this);
+        }
+
+        Invalidate(true);
+        StyleTabButtons();
+    }
+
+    private Control BuildTabs()
+    {
+        var host = new TableLayoutPanel
         {
             Dock = DockStyle.Top,
-            Size = new Size(472, 185),
+            AutoSize = true,
+            ColumnCount = 1,
             Margin = new Padding(0, 0, 0, 10)
         };
+        host.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        host.RowStyles.Add(new RowStyle(SizeType.Absolute, 620));
 
-        var statusPage = new TabPage("Status") { Padding = new Padding(10) };
-        statusPage.Controls.Add(BuildStatusPanel());
+        var tabStrip = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Padding = new Padding(0),
+            Margin = new Padding(0)
+        };
 
-        var settingsPage = new TabPage("Settings") { Padding = new Padding(10) };
-        settingsPage.Controls.Add(BuildSettingsPanel());
+        _tabContentPanel = new Panel
+        {
+            Dock = DockStyle.Top,
+            Size = new Size(840, 620),
+            Padding = new Padding(10),
+            Margin = new Padding(0)
+        };
 
-        var aboutPage = new TabPage("About") { Padding = new Padding(10) };
-        aboutPage.Controls.Add(BuildAboutPanel());
+        AddTab(tabStrip, "Status", BuildStatusPanel());
+        AddTab(tabStrip, "Settings", BuildSettingsPanel());
+        AddTab(tabStrip, "About", BuildAboutPanel());
 
-        tabs.TabPages.Add(statusPage);
-        tabs.TabPages.Add(settingsPage);
-        tabs.TabPages.Add(aboutPage);
-        tabs.SelectedIndex = 0;
-        return tabs;
+        host.Controls.Add(tabStrip, 0, 0);
+        host.Controls.Add(_tabContentPanel, 0, 1);
+        SelectTab(0);
+        return host;
     }
 
-    private TableLayoutPanel BuildStatusPanel()
+    private void AddTab(FlowLayoutPanel tabStrip, string text, Control page)
     {
-        var grid = CreateTwoColumnGrid(170);
-        grid.Dock = DockStyle.Fill;
-        ConfigureStatusLabel(_luxStatusLabel);
-        ConfigureStatusLabel(_brightnessStatusLabel);
-        ConfigureStatusLabel(_monitorStatusLabel);
-        ConfigureStatusLabel(_messageStatusLabel);
+        var index = _tabPages.Count;
+        var button = new Button
+        {
+            Text = text,
+            AutoSize = true,
+            FlatStyle = FlatStyle.Flat,
+            Margin = new Padding(0, 0, 4, 0),
+            Padding = new Padding(10, 4, 10, 4)
+        };
+        button.Click += (_, _) => SelectTab(index);
 
-        AddRow(grid, "Current lux", _luxStatusLabel);
-        AddRow(grid, "Target brightness", _brightnessStatusLabel);
-        AddRow(grid, "Monitors", _monitorStatusLabel);
-        AddRow(grid, "Message", _messageStatusLabel);
-
-        return grid;
+        page.Dock = DockStyle.Fill;
+        page.Visible = false;
+        _tabButtons.Add(button);
+        _tabPages.Add(page);
+        tabStrip.Controls.Add(button);
+        _tabContentPanel.Controls.Add(page);
     }
 
-    private Control BuildAboutPanel()
+    private void SelectTab(int index)
+    {
+        _selectedTabIndex = index;
+        for (var item = 0; item < _tabPages.Count; item++)
+        {
+            _tabPages[item].Visible = item == index;
+        }
+
+        StyleTabButtons();
+    }
+
+    private void StyleTabButtons()
+    {
+        var dark = ThemeManager.IsDarkMode();
+        for (var index = 0; index < _tabButtons.Count; index++)
+        {
+            var selected = index == _selectedTabIndex;
+            var button = _tabButtons[index];
+            button.FlatStyle = FlatStyle.Flat;
+            button.UseVisualStyleBackColor = false;
+            button.BackColor = dark
+                ? selected ? Color.FromArgb(58, 58, 58) : Color.FromArgb(36, 36, 36)
+                : selected ? Color.White : SystemColors.Control;
+            button.ForeColor = dark ? Color.FromArgb(242, 242, 242) : SystemColors.ControlText;
+            button.FlatAppearance.BorderColor = dark
+                ? selected ? Color.FromArgb(82, 82, 82) : Color.FromArgb(56, 56, 56)
+                : selected ? Color.FromArgb(150, 150, 150) : Color.FromArgb(210, 210, 210);
+            button.FlatAppearance.BorderSize = 1;
+        }
+    }
+
+    private Control BuildStatusPanel()
     {
         var panel = new TableLayoutPanel
         {
@@ -156,46 +252,499 @@ public partial class Form1 : Form
             ColumnCount = 1
         };
 
-        panel.Controls.Add(new Label { Text = $"Software version: {AppVersion}", AutoSize = true });
-        panel.Controls.Add(new Label { Text = "License: MIT License", AutoSize = true });
-        panel.Controls.Add(new Label { Text = "Copyright (c) 2026", AutoSize = true });
+        var grid = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            ColumnCount = 4,
+            Margin = new Padding(0, 0, 0, 8)
+        };
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
+        grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        grid.Dock = DockStyle.Top;
+        ConfigureStatusLabel(_luxStatusLabel);
+        ConfigureStatusLabel(_brightnessStatusLabel);
+        ConfigureStatusLabel(_monitorStatusLabel);
+        ConfigureStatusLabel(_messageStatusLabel);
 
-        var link = new LinkLabel
+        AddStatusPairRow(grid, "Current lux", _luxStatusLabel, "Monitors", _monitorStatusLabel);
+        AddStatusPairRow(grid, "Target brightness", _brightnessStatusLabel, "Message", _messageStatusLabel);
+
+        panel.Controls.Add(grid);
+        panel.Controls.Add(BuildCurvesPanel());
+        return panel;
+    }
+
+    private Control BuildAboutPanel()
+    {
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = false,
+            ColumnCount = 1,
+            RowCount = 5
+        };
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        panel.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+
+        panel.Controls.Add(new Label
+        {
+            Text = "Application",
+            AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold),
+            Margin = new Padding(0, 0, 0, 6)
+        });
+
+        var infoGrid = CreateTwoColumnGrid(140);
+        infoGrid.Dock = DockStyle.Top;
+        AddRow(infoGrid, "Version", new Label { Text = AppVersion, AutoSize = true });
+        panel.Controls.Add(infoGrid);
+
+        var linkRow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Margin = new Padding(0, 2, 0, 8)
+        };
+
+        var websiteLink = new LinkLabel
         {
             Text = "planetenexpress.de",
-            AutoSize = true
+            AutoSize = true,
+            Margin = new Padding(0, 4, 18, 4)
         };
-        link.LinkClicked += (_, _) =>
+        websiteLink.LinkClicked += (_, _) => OpenUrl("https://planetenexpress.de");
+
+        var githubLink = new LinkLabel
         {
-            System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = "https://planetenexpress.de",
-                UseShellExecute = true
-            });
+            Text = "GitHub project",
+            AutoSize = true,
+            Margin = new Padding(0, 4, 18, 4)
         };
-        panel.Controls.Add(link);
+        githubLink.LinkClicked += (_, _) => OpenUrl("https://github.com/afaminx/DDC-CI-HA-Bridge");
+
+        var updateButton = new Button
+        {
+            Text = "Check for updates",
+            AutoSize = true,
+            Margin = new Padding(0)
+        };
+        updateButton.Click += async (_, _) => await CheckForUpdatesAsync(showNoUpdate: true);
+
+        linkRow.Controls.Add(websiteLink);
+        linkRow.Controls.Add(githubLink);
+        linkRow.Controls.Add(updateButton);
+        panel.Controls.Add(linkRow);
+
+        panel.Controls.Add(new Label
+        {
+            Text = "License",
+            AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold),
+            Margin = new Padding(0, 4, 0, 6)
+        });
+
+        var licenseText = File.Exists("LICENSE.txt")
+            ? File.ReadAllText("LICENSE.txt")
+            : GetBundledLicenseText();
+        var licenseLabel = new Label
+        {
+            Text = licenseText,
+            Dock = DockStyle.Fill,
+            AutoSize = false,
+            Margin = new Padding(0),
+            Padding = new Padding(6, 4, 6, 4),
+            Font = new Font("Segoe UI", 8F),
+            BorderStyle = BorderStyle.None,
+            TextAlign = ContentAlignment.TopLeft
+        };
+        panel.Controls.Add(licenseLabel);
 
         return panel;
     }
 
-    private Control BuildSettingsPanel()
+    private Control BuildCurvesPanel()
     {
-        var panel = new FlowLayoutPanel
+        var availableMonitors = new List<DetectedMonitor>();
+        try
+        {
+            availableMonitors = MonitorBrightnessController.GetMonitors();
+        }
+        catch
+        {
+            availableMonitors = [];
+        }
+
+        var defaultCurve = _settings.DefaultCurve.Clone();
+        var monitorCurves = _settings.MonitorCurves.Select(curve => curve.Clone()).ToList();
+        var referenceLux = _settings.ReferenceLux;
+        var selectedKey = "";
+        var loading = false;
+
+        var referenceLuxBox = CreateNumberBox(1, 1000000, 1000, referenceLux);
+        var monitorBox = new ThemedComboBox { DropDownStyle = ComboBoxStyle.DropDownList };
+        var sectionLabel = new Label
+        {
+            Text = "Brightness curve",
+            AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold),
+            Margin = new Padding(0, 2, 0, 6)
+        };
+
+        var customCurveBox = new CheckBox { Text = "Use monitor-specific curve", AutoSize = true };
+        var editor = new CurveEditorControl { Dock = DockStyle.Fill, MinimumSize = new Size(560, 350), ReferenceLux = referenceLux, CurrentLux = _currentLux };
+        var selectedLuxBox = CreateNumberBox(0, referenceLux, 100, 0);
+        var selectedBrightnessBox = CreateNumberBox(1, 100, 1, 1);
+        var addPointButton = new Button { Text = "Add", AutoSize = true };
+        var removePointButton = new Button { Text = "Remove", AutoSize = true };
+        var applyButton = new Button { Text = "Apply", AutoSize = true };
+        selectedLuxBox.Width = 90;
+        selectedBrightnessBox.Width = 90;
+
+        monitorBox.Items.Add(new MonitorSelectionItem("Default graph", "", isDefault: true));
+        foreach (var monitor in availableMonitors)
+        {
+            monitorBox.Items.Add(new MonitorSelectionItem(monitor.DisplayName, monitor.Key, isDefault: false));
+        }
+        monitorBox.SelectedIndex = 0;
+
+        var body = new TableLayoutPanel
         {
             Dock = DockStyle.Fill,
             AutoSize = true,
+            ColumnCount = 5
+        };
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 104));
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 150));
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 22));
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 92));
+        body.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+        void AddFullWidthRow(Control control, SizeType sizeType = SizeType.AutoSize, float height = 0)
+        {
+            var row = body.RowCount++;
+            body.RowStyles.Add(sizeType == SizeType.AutoSize
+                ? new RowStyle(SizeType.AutoSize)
+                : new RowStyle(sizeType, height));
+            body.Controls.Add(control, 0, row);
+            body.SetColumnSpan(control, 5);
+        }
+
+        void AddCurveSelectorRow()
+        {
+            var row = body.RowCount++;
+            body.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+            var maxLabel = new Label { Text = "Maximum lux", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 8, 6) };
+            var targetLabel = new Label { Text = "Curve target", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 8, 6) };
+            referenceLuxBox.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            monitorBox.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+            referenceLuxBox.Margin = new Padding(0, 4, 0, 4);
+            monitorBox.Margin = new Padding(0, 4, 0, 4);
+
+            body.Controls.Add(maxLabel, 0, row);
+            body.Controls.Add(referenceLuxBox, 1, row);
+            body.Controls.Add(targetLabel, 3, row);
+            body.Controls.Add(monitorBox, 4, row);
+        }
+
+        var pointRow = new FlowLayoutPanel
+        {
+            Dock = DockStyle.None,
+            AutoSize = true,
             FlowDirection = FlowDirection.LeftToRight,
-            WrapContents = false
+            WrapContents = false,
+            Padding = new Padding(0),
+            Margin = new Padding(0)
+        };
+        pointRow.Controls.Add(new Label { Text = "Selected lux", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 6, 6) });
+        pointRow.Controls.Add(selectedLuxBox);
+        pointRow.Controls.Add(new Label { Text = "Brightness (%)", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(14, 6, 6, 6) });
+        pointRow.Controls.Add(selectedBrightnessBox);
+        pointRow.Controls.Add(addPointButton);
+        pointRow.Controls.Add(removePointButton);
+        pointRow.Controls.Add(applyButton);
+
+        var graphHost = new Panel
+        {
+            Dock = DockStyle.Fill,
+            Height = editor.Height,
+            Margin = new Padding(0, 10, 0, 0)
+        };
+        graphHost.Controls.Add(editor);
+
+        var pointHost = new Panel
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 8, 0, 0)
+        };
+        pointHost.Controls.Add(pointRow);
+        pointHost.Layout += (_, _) =>
+        {
+            var preferred = pointRow.GetPreferredSize(Size.Empty);
+            pointRow.Size = preferred;
+            pointRow.Left = Math.Max(0, pointHost.ClientSize.Width - preferred.Width);
+            pointRow.Top = 0;
         };
 
-        var homeAssistantButton = new Button { Text = "Home Assistant...", AutoSize = true };
-        homeAssistantButton.Click += (_, _) => ShowHomeAssistantSettings();
+        AddFullWidthRow(sectionLabel);
+        AddCurveSelectorRow();
+        AddFullWidthRow(customCurveBox);
+        AddFullWidthRow(graphHost, SizeType.Absolute, editor.MinimumSize.Height + 12);
+        AddFullWidthRow(pointHost, SizeType.Absolute, pointRow.GetPreferredSize(Size.Empty).Height + 10);
 
-        var brightnessButton = new Button { Text = "Brightness control...", AutoSize = true };
-        brightnessButton.Click += (_, _) => ShowBrightnessSettings();
+        MonitorCurveSettings GetOrCreateMonitorCurve(string monitorKey)
+        {
+            var monitor = availableMonitors.FirstOrDefault(item => item.Key == monitorKey);
+            var monitorCurve = monitorCurves.FirstOrDefault(item => item.MonitorKey == monitorKey);
+            if (monitorCurve is not null)
+            {
+                if (monitor is not null)
+                {
+                    monitorCurve.DisplayName = monitor.DisplayName;
+                }
 
-        panel.Controls.Add(homeAssistantButton);
-        panel.Controls.Add(brightnessButton);
+                return monitorCurve;
+            }
+
+            monitorCurve = new MonitorCurveSettings
+            {
+                MonitorKey = monitorKey,
+                DisplayName = monitor?.DisplayName ?? monitorKey,
+                Enabled = false,
+                Curve = defaultCurve.Clone()
+            };
+            monitorCurves.Add(monitorCurve);
+            return monitorCurve;
+        }
+
+        void SaveEditorToSelected()
+        {
+            if (loading)
+            {
+                return;
+            }
+
+            if (selectedKey.Length == 0)
+            {
+                defaultCurve = editor.ToCurve();
+                return;
+            }
+
+            var monitorCurve = GetOrCreateMonitorCurve(selectedKey);
+            if (customCurveBox.Checked)
+            {
+                monitorCurve.Enabled = true;
+                monitorCurve.Curve = editor.ToCurve();
+            }
+        }
+
+        void LoadSelectedGraph()
+        {
+            loading = true;
+            if (monitorBox.SelectedItem is not MonitorSelectionItem item || item.IsDefault)
+            {
+                selectedKey = "";
+                customCurveBox.Checked = false;
+                customCurveBox.Visible = false;
+                editor.Enabled = true;
+                editor.SetPoints(defaultCurve.Points);
+            }
+            else
+            {
+                selectedKey = item.MonitorKey;
+                customCurveBox.Visible = true;
+                customCurveBox.Enabled = true;
+                var monitorCurve = GetOrCreateMonitorCurve(selectedKey);
+                customCurveBox.Checked = monitorCurve.Enabled;
+                editor.Enabled = monitorCurve.Enabled;
+                editor.SetPoints(monitorCurve.Enabled ? monitorCurve.Curve.Points : defaultCurve.Points);
+            }
+
+            loading = false;
+        }
+
+        void UpdateSelectedPointFields()
+        {
+            loading = true;
+            if (editor.SelectedPoint is { } point)
+            {
+                selectedLuxBox.Value = Math.Clamp(editor.GetSelectedEffectiveLux(), selectedLuxBox.Minimum, selectedLuxBox.Maximum);
+                selectedBrightnessBox.Value = Math.Clamp(point.Brightness, selectedBrightnessBox.Minimum, selectedBrightnessBox.Maximum);
+            }
+
+            loading = false;
+        }
+
+        monitorBox.SelectedIndexChanged += (_, _) =>
+        {
+            SaveEditorToSelected();
+            LoadSelectedGraph();
+            UpdateSelectedPointFields();
+        };
+        referenceLuxBox.ValueChanged += (_, _) =>
+        {
+            if (loading)
+            {
+                return;
+            }
+
+            SaveEditorToSelected();
+            loading = true;
+            referenceLux = referenceLuxBox.Value;
+            SetNumericMaximumSafely(selectedLuxBox, referenceLux);
+            editor.ReferenceLux = referenceLux;
+            loading = false;
+            UpdateSelectedPointFields();
+        };
+        customCurveBox.CheckedChanged += (_, _) =>
+        {
+            if (loading || selectedKey.Length == 0)
+            {
+                return;
+            }
+
+            var monitorCurve = GetOrCreateMonitorCurve(selectedKey);
+            monitorCurve.Enabled = customCurveBox.Checked;
+            editor.Enabled = customCurveBox.Checked;
+            editor.SetPoints(customCurveBox.Checked ? monitorCurve.Curve.Points : defaultCurve.Points);
+            UpdateSelectedPointFields();
+        };
+        editor.PointsChanged += (_, _) => SaveEditorToSelected();
+        editor.SelectedPointChanged += (_, _) => UpdateSelectedPointFields();
+        selectedLuxBox.ValueChanged += (_, _) =>
+        {
+            if (!loading && editor.Enabled)
+            {
+                editor.UpdateSelected(selectedLuxBox.Value, (int)selectedBrightnessBox.Value);
+            }
+        };
+        selectedBrightnessBox.ValueChanged += (_, _) =>
+        {
+            if (!loading && editor.Enabled)
+            {
+                editor.UpdateSelected(selectedLuxBox.Value, (int)selectedBrightnessBox.Value);
+            }
+        };
+        addPointButton.Click += (_, _) => editor.AddPoint();
+        removePointButton.Click += (_, _) => editor.RemoveSelectedPoint();
+        applyButton.Click += (_, _) =>
+        {
+            SaveEditorToSelected();
+            _settings.ReferenceLux = referenceLuxBox.Value;
+            _settings.DefaultCurve = defaultCurve;
+            _settings.MonitorCurves = monitorCurves;
+            SaveSettings();
+            RestartTimer();
+            _messageStatusLabel.Text = "Brightness curve applied.";
+        };
+
+        LoadSelectedGraph();
+        UpdateSelectedPointFields();
+        _openCurveEditors.Add(editor);
+        return body;
+    }
+
+    private Control BuildSettingsPanel()
+    {
+        var panel = new TableLayoutPanel
+        {
+            Dock = DockStyle.Fill,
+            AutoSize = true,
+            ColumnCount = 1
+        };
+
+        var generalLabel = new Label
+        {
+            Text = "General",
+            AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold),
+            Margin = new Padding(0, 0, 0, 6)
+        };
+
+        _enabledSettingsBox.Text = "Automatic brightness control";
+        _enabledSettingsBox.AutoSize = true;
+        _enabledSettingsBox.CheckedChanged += (_, _) => ApplyGeneralSettingsFromUi();
+
+        _startupSettingsBox.Text = "Start at Windows sign-in";
+        _startupSettingsBox.AutoSize = true;
+        _startupSettingsBox.CheckedChanged += (_, _) => ApplyGeneralSettingsFromUi();
+
+        _startMinimizedSettingsBox.Text = "Start minimized in notification area";
+        _startMinimizedSettingsBox.AutoSize = true;
+        _startMinimizedSettingsBox.CheckedChanged += (_, _) => ApplyGeneralSettingsFromUi();
+
+        _checkUpdatesBox.Text = "Check for updates at startup";
+        _checkUpdatesBox.AutoSize = true;
+        _checkUpdatesBox.CheckedChanged += (_, _) => ApplyGeneralSettingsFromUi();
+
+        var options = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            FlowDirection = FlowDirection.TopDown,
+            WrapContents = false,
+            Margin = new Padding(0, 0, 0, 10)
+        };
+        options.Controls.Add(_enabledSettingsBox);
+        options.Controls.Add(_startupSettingsBox);
+        options.Controls.Add(_startMinimizedSettingsBox);
+        options.Controls.Add(_checkUpdatesBox);
+
+        var connectionLabel = new Label
+        {
+            Text = "Connection",
+            AutoSize = true,
+            Font = new Font(Font, FontStyle.Bold),
+            Margin = new Padding(0, 10, 0, 4)
+        };
+
+        var addressBox = new TextBox { Text = _settings.HomeAssistantAddress, Dock = DockStyle.Fill };
+        var sensorBox = new TextBox { Text = _settings.SensorEntityId, Dock = DockStyle.Fill };
+        var tokenBox = new TextBox { Text = _settings.Token, Dock = DockStyle.Fill, UseSystemPasswordChar = true };
+        var pollingSecondsBox = CreateNumberBox(5, 3600, 1, Math.Clamp(_settings.PollingSeconds, 5, 3600));
+
+        var connectionGrid = CreateTwoColumnGrid(205);
+        connectionGrid.Dock = DockStyle.Top;
+        AddRow(connectionGrid, "Home Assistant server", addressBox);
+        AddRow(connectionGrid, "Sensor entity", sensorBox);
+        AddRow(connectionGrid, "Access token", tokenBox);
+        AddRow(connectionGrid, "Polling interval (seconds)", pollingSecondsBox);
+
+        var saveConnectionButton = new Button { Text = "Apply", AutoSize = true };
+        saveConnectionButton.Click += (_, _) =>
+        {
+            _settings.HomeAssistantAddress = addressBox.Text.Trim();
+            _settings.SensorEntityId = sensorBox.Text.Trim();
+            _settings.Token = tokenBox.Text.Trim();
+            _settings.PollingSeconds = (int)pollingSecondsBox.Value;
+            SaveSettings();
+            RestartTimer();
+            _messageStatusLabel.Text = "Connection settings saved.";
+        };
+
+        var connectionButtons = new FlowLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+            Margin = new Padding(0, 4, 0, 0)
+        };
+        connectionButtons.Controls.Add(saveConnectionButton);
+
+        panel.Controls.Add(generalLabel);
+        panel.Controls.Add(options);
+        panel.Controls.Add(connectionLabel);
+        panel.Controls.Add(connectionGrid);
+        panel.Controls.Add(connectionButtons);
         return panel;
     }
 
@@ -246,17 +795,20 @@ public partial class Form1 : Form
         var addressBox = new TextBox { Text = _settings.HomeAssistantAddress, Dock = DockStyle.Fill };
         var sensorBox = new TextBox { Text = _settings.SensorEntityId, Dock = DockStyle.Fill };
         var tokenBox = new TextBox { Text = _settings.Token, Dock = DockStyle.Fill, UseSystemPasswordChar = true };
+        var pollingSecondsBox = CreateNumberBox(5, 3600, 1, Math.Clamp(_settings.PollingSeconds, 5, 3600));
 
         var grid = CreateDialogGrid();
         AddRow(grid, "Home Assistant host (IP:port)", addressBox);
         AddRow(grid, "Sensor entity ID", sensorBox);
         AddRow(grid, "Long-lived access token", tokenBox);
+        AddRow(grid, "Polling interval (seconds)", pollingSecondsBox);
 
         var buttons = BuildDialogButtons(dialog, () =>
         {
             _settings.HomeAssistantAddress = addressBox.Text.Trim();
             _settings.SensorEntityId = sensorBox.Text.Trim();
             _settings.Token = tokenBox.Text.Trim();
+            _settings.PollingSeconds = (int)pollingSecondsBox.Value;
             SaveSettings();
             RestartTimer();
             return true;
@@ -264,6 +816,7 @@ public partial class Form1 : Form
         dialog.Controls.Add(buttons);
         dialog.Controls.Add(grid);
         FitDialogToContent(dialog, grid, buttons, 520);
+        ThemeManager.Apply(dialog);
 
         dialog.ShowDialog(this);
     }
@@ -298,14 +851,11 @@ public partial class Form1 : Form
             MinimizeBox = false
         };
 
-        var enabledBox = new CheckBox { Text = "Enable automatic brightness control", Checked = _settings.Enabled, AutoSize = true };
-        var startWithWindowsBox = new CheckBox { Text = "Start with Windows", Checked = IsStartupEnabled(), AutoSize = true };
-        var startMinimizedBox = new CheckBox { Text = "Start minimized to tray", Checked = _settings.StartMinimized, AutoSize = true };
         var pollingSecondsBox = CreateNumberBox(5, 3600, 1, Math.Clamp(_settings.PollingSeconds, 5, 3600));
         var referenceLuxBox = CreateNumberBox(1, 1000000, 1000, referenceLux);
         var monitorBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 430 };
         var customCurveBox = new CheckBox { Text = "Use custom graph for this monitor", AutoSize = true };
-        var editor = new CurveEditorControl { Size = new Size(700, 320), Anchor = AnchorStyles.Left | AnchorStyles.Right, ReferenceLux = referenceLux };
+        var editor = new CurveEditorControl { Size = new Size(700, 320), Anchor = AnchorStyles.Left | AnchorStyles.Right, ReferenceLux = referenceLux, CurrentLux = _currentLux };
         var selectedLuxBox = CreateNumberBox(0, referenceLux, 100, 0);
         var selectedBrightnessBox = CreateNumberBox(1, 100, 1, 1);
         var addPointButton = new Button { Text = "Add point", AutoSize = true };
@@ -324,9 +874,6 @@ public partial class Form1 : Form
         optionsGrid.Padding = new Padding(14, 14, 14, 0);
         AddRow(optionsGrid, "Polling interval (seconds)", pollingSecondsBox);
         AddRow(optionsGrid, "Reference lux", referenceLuxBox);
-        AddRow(optionsGrid, "", enabledBox);
-        AddRow(optionsGrid, "", startWithWindowsBox);
-        AddRow(optionsGrid, "", startMinimizedBox);
         AddRow(optionsGrid, "Graph target", monitorBox);
         AddRow(optionsGrid, "", customCurveBox);
 
@@ -524,21 +1071,9 @@ public partial class Form1 : Form
         {
             SaveEditorToSelected();
             _settings.PollingSeconds = (int)pollingSecondsBox.Value;
-            _settings.Enabled = enabledBox.Checked;
-            _settings.StartMinimized = startMinimizedBox.Checked;
             _settings.ReferenceLux = referenceLuxBox.Value;
             _settings.DefaultCurve = defaultCurve;
             _settings.MonitorCurves = monitorCurves;
-
-            try
-            {
-                StartupManager.SetEnabled(startWithWindowsBox.Checked, startMinimizedBox.Checked);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, ex.Message, "Startup setting", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return false;
-            }
 
             SaveSettings();
             RestartTimer();
@@ -547,8 +1082,17 @@ public partial class Form1 : Form
         dialog.Controls.Add(buttons);
         dialog.Controls.Add(body);
         FitDialogToContent(dialog, body, buttons, 760);
+        ThemeManager.Apply(dialog);
 
-        dialog.ShowDialog(this);
+        _openCurveEditors.Add(editor);
+        try
+        {
+            dialog.ShowDialog(this);
+        }
+        finally
+        {
+            _openCurveEditors.Remove(editor);
+        }
     }
 
     private FlowLayoutPanel BuildDialogButtons(Form dialog, Func<bool> save)
@@ -622,6 +1166,45 @@ public partial class Form1 : Form
 
         grid.Controls.Add(label, 0, row);
         grid.Controls.Add(control, 1, row);
+    }
+
+    private static void AddStatusPairRow(TableLayoutPanel grid, string leftLabel, Control leftControl, string rightLabel, Control rightControl)
+    {
+        var row = grid.RowCount++;
+        grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        var left = new Label { Text = leftLabel, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(0, 6, 12, 6) };
+        var right = new Label { Text = rightLabel, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(20, 6, 12, 6) };
+        leftControl.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        rightControl.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        leftControl.Margin = new Padding(0, 4, 0, 4);
+        rightControl.Margin = new Padding(0, 4, 0, 4);
+
+        grid.Controls.Add(left, 0, row);
+        grid.Controls.Add(leftControl, 1, row);
+        grid.Controls.Add(right, 2, row);
+        grid.Controls.Add(rightControl, 3, row);
+    }
+
+    private static void AddWideRow(TableLayoutPanel grid, string labelText, Control control)
+    {
+        var row = grid.RowCount++;
+        grid.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+
+        var label = new Label
+        {
+            Text = labelText,
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(0, 6, 12, 6)
+        };
+
+        control.Anchor = AnchorStyles.Left | AnchorStyles.Right;
+        control.Margin = new Padding(0, 4, 0, 4);
+
+        grid.Controls.Add(label, 0, row);
+        grid.Controls.Add(control, 1, row);
+        grid.SetColumnSpan(control, 3);
     }
 
     private static NumericUpDown CreateNumberBox(decimal minimum, decimal maximum, decimal increment, decimal value)
@@ -704,7 +1287,45 @@ public partial class Form1 : Form
         dialog.MinimumSize = dialog.Size;
     }
 
-    private void SaveSettings() => _settings.Save();
+    private void SaveSettings()
+    {
+        _settings.Save();
+        SyncSettingsControls();
+    }
+
+    private void SyncSettingsControls()
+    {
+        _updatingSettingsControls = true;
+        _enabledSettingsBox.Checked = _settings.Enabled;
+        _startupSettingsBox.Checked = IsStartupEnabled();
+        _startMinimizedSettingsBox.Checked = _settings.StartMinimized;
+        _checkUpdatesBox.Checked = _settings.CheckForUpdates;
+        _updatingSettingsControls = false;
+    }
+
+    private void ApplyGeneralSettingsFromUi()
+    {
+        if (_updatingSettingsControls)
+        {
+            return;
+        }
+
+        _settings.Enabled = _enabledSettingsBox.Checked;
+        _settings.StartMinimized = _startMinimizedSettingsBox.Checked;
+        _settings.CheckForUpdates = _checkUpdatesBox.Checked;
+
+        try
+        {
+            StartupManager.SetEnabled(_startupSettingsBox.Checked, _startMinimizedSettingsBox.Checked);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, ex.Message, "Startup setting", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        SaveSettings();
+        RestartTimer();
+    }
 
     private bool IsStartupEnabled()
     {
@@ -739,6 +1360,52 @@ public partial class Form1 : Form
         UpdateToggleButton();
     }
 
+    private async Task CheckForUpdatesOnStartupAsync()
+    {
+        if (!_settings.CheckForUpdates)
+        {
+            return;
+        }
+
+        await CheckForUpdatesAsync(showNoUpdate: false);
+    }
+
+    private async Task CheckForUpdatesAsync(bool showNoUpdate)
+    {
+        try
+        {
+            var release = await _updateChecker.GetNewerReleaseAsync(AppVersion, CancellationToken.None);
+            if (release is null || IsDisposed)
+            {
+                if (showNoUpdate)
+                {
+                    MessageBox.Show(this, "You are using the latest available release.", "No update available", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+
+                return;
+            }
+
+            var result = MessageBox.Show(
+                this,
+                $"A newer release is available: {release.TagName}.{Environment.NewLine}{Environment.NewLine}Open the GitHub project page now?",
+                "Update available",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Information);
+
+            if (result == DialogResult.Yes)
+            {
+                OpenUrl("https://github.com/afaminx/DDC-CI-HA-Bridge");
+            }
+        }
+        catch (Exception ex)
+        {
+            if (showNoUpdate)
+            {
+                MessageBox.Show(this, "Could not check for updates: " + ex.Message, "Update check", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+    }
+
     private async Task PollAndApplyAsync()
     {
         if (!_settings.Enabled)
@@ -761,6 +1428,7 @@ public partial class Form1 : Form
                 _settings.SensorEntityId,
                 _settings.Token,
                 CancellationToken.None);
+            SetCurrentLux(lux);
 
             var previewBrightness = BrightnessMapper.MapLuxToBrightness(lux, _settings.DefaultCurve, _settings.ReferenceLux);
             _luxStatusLabel.Text = $"{lux:N0} lux";
@@ -792,6 +1460,19 @@ public partial class Form1 : Form
     private void UpdateToggleButton()
     {
         _toggleButton.Text = _settings.Enabled ? "Pause" : "Resume";
+        SyncSettingsControls();
+    }
+
+    private void SetCurrentLux(decimal lux)
+    {
+        _currentLux = lux;
+        foreach (var editor in _openCurveEditors.ToArray())
+        {
+            if (!editor.IsDisposed)
+            {
+                editor.CurrentLux = lux;
+            }
+        }
     }
 
     private BrightnessCurve GetEffectiveCurve(DetectedMonitor monitor)
@@ -831,6 +1512,42 @@ public partial class Form1 : Form
     {
         var text = AppTitle + " - " + suffix;
         _notifyIcon.Text = text.Length > 63 ? text[..63] : text;
+    }
+
+    private static void OpenUrl(string url)
+    {
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = url,
+            UseShellExecute = true
+        });
+    }
+
+    private static string GetBundledLicenseText()
+    {
+        return """
+MIT License
+
+Copyright (c) 2026 planetenexpress.de
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+""";
     }
 
     private void HideToTray()

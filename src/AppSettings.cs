@@ -7,7 +7,7 @@ internal sealed class AppSettings
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    public int SettingsVersion { get; set; } = 4;
+    public int SettingsVersion { get; set; } = 5;
     public string HomeAssistantAddress { get; set; } = "192.168.3.134:8123";
     public string SensorEntityId { get; set; } = "sensor.gw2000a_solar_lux";
     [JsonIgnore]
@@ -20,7 +20,8 @@ internal sealed class AppSettings
     public int PollingSeconds { get; set; } = 5;
     public bool Enabled { get; set; } = true;
     public bool StartMinimized { get; set; } = true;
-    public decimal ReferenceLux { get; set; } = 40000;
+    public decimal ReferenceLux { get; set; } = 100;
+    public bool CheckForUpdates { get; set; }
     public BrightnessCurve DefaultCurve { get; set; } = BrightnessCurve.CreateDefault();
     public List<MonitorCurveSettings> MonitorCurves { get; set; } = [];
 
@@ -72,7 +73,7 @@ internal sealed class AppSettings
             monitorCurve.Curve.Normalize(ReferenceLux);
         }
 
-        SettingsVersion = 4;
+        SettingsVersion = 5;
         File.WriteAllText(SettingsPath, JsonSerializer.Serialize(this, JsonOptions));
     }
 
@@ -110,7 +111,7 @@ internal sealed class AppSettings
             monitorCurve.Curve.Normalize(ReferenceLux);
         }
 
-        SettingsVersion = 4;
+        SettingsVersion = 5;
     }
 }
 
@@ -152,7 +153,7 @@ internal sealed class BrightnessCurve
         };
     }
 
-    public void Normalize(decimal referenceLux = 40000)
+    public void Normalize(decimal referenceLux = 100)
     {
         referenceLux = Math.Clamp(referenceLux, 1, 1000000);
         var pointsLookAbsolute = Points.Any(point => point.Lux > 100);

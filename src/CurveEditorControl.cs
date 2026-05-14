@@ -5,7 +5,9 @@ internal sealed class CurveEditorControl : Control
     private readonly List<CurvePoint> _points = [];
     private int _selectedIndex = -1;
     private bool _dragging;
-    private decimal _referenceLux = 40000;
+    private bool _darkMode;
+    private decimal _referenceLux = 100;
+    private decimal? _currentLux;
 
     public event EventHandler? PointsChanged;
     public event EventHandler? SelectedPointChanged;
@@ -33,6 +35,24 @@ internal sealed class CurveEditorControl : Control
             Normalize();
             Invalidate();
         }
+    }
+
+    public decimal? CurrentLux
+    {
+        get => _currentLux;
+        set
+        {
+            _currentLux = value;
+            Invalidate();
+        }
+    }
+
+    public void ApplyTheme(bool darkMode)
+    {
+        _darkMode = darkMode;
+        BackColor = darkMode ? Color.FromArgb(32, 32, 32) : SystemColors.Control;
+        ForeColor = darkMode ? Color.FromArgb(242, 242, 242) : SystemColors.ControlText;
+        Invalidate();
     }
 
     public void SetPoints(IEnumerable<CurvePoint> points)
@@ -88,15 +108,23 @@ internal sealed class CurveEditorControl : Control
         graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
 
         var plot = GetPlotArea();
-        using var plotBrush = new SolidBrush(Color.White);
-        using var gridPen = new Pen(Color.FromArgb(214, 219, 224));
-        using var axisPen = new Pen(Color.FromArgb(120, 130, 140));
+        var plotColor = _darkMode ? Color.FromArgb(42, 42, 42) : Color.White;
+        var gridColor = _darkMode ? Color.FromArgb(82, 88, 94) : Color.FromArgb(214, 219, 224);
+        var axisColor = _darkMode ? Color.FromArgb(140, 146, 152) : Color.FromArgb(120, 130, 140);
+        var pointColor = _darkMode ? Color.FromArgb(32, 32, 32) : Color.White;
+        var currentColor = _darkMode ? Color.FromArgb(255, 193, 7) : Color.FromArgb(220, 20, 60);
+
+        using var plotBrush = new SolidBrush(plotColor);
+        using var gridPen = new Pen(gridColor);
+        using var axisPen = new Pen(axisColor);
         using var linePen = new Pen(Color.FromArgb(0, 120, 215), 2);
         using var extensionPen = new Pen(Color.FromArgb(0, 120, 215), 2);
-        using var pointBrush = new SolidBrush(Color.White);
+        using var pointBrush = new SolidBrush(pointColor);
         using var selectedBrush = new SolidBrush(Color.FromArgb(0, 120, 215));
         using var pointBorderPen = new Pen(Color.FromArgb(0, 120, 215), 2);
         using var selectedBorderPen = new Pen(Color.FromArgb(255, 128, 0), 3);
+        using var currentBrush = new SolidBrush(currentColor);
+        using var currentBorderPen = new Pen(Color.White, 2);
         using var textBrush = new SolidBrush(ForeColor);
 
         graphics.Clear(BackColor);
@@ -144,6 +172,16 @@ internal sealed class CurveEditorControl : Control
             var brush = index == _selectedIndex ? selectedBrush : pointBrush;
             graphics.FillEllipse(brush, screenPoint.X - radius, screenPoint.Y - radius, radius * 2, radius * 2);
             graphics.DrawEllipse(selected ? selectedBorderPen : pointBorderPen, screenPoint.X - radius, screenPoint.Y - radius, radius * 2, radius * 2);
+        }
+
+        if (_currentLux is { } currentLux)
+        {
+            var currentPercent = Math.Clamp(currentLux / ReferenceLux * 100m, 0, 100);
+            var currentBrightness = GetBrightnessAtPercent(currentPercent);
+            var screenPoint = ToScreen(new CurvePoint { Lux = currentPercent, Brightness = currentBrightness });
+            const int radius = 7;
+            graphics.FillEllipse(currentBrush, screenPoint.X - radius, screenPoint.Y - radius, radius * 2, radius * 2);
+            graphics.DrawEllipse(currentBorderPen, screenPoint.X - radius, screenPoint.Y - radius, radius * 2, radius * 2);
         }
     }
 
