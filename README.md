@@ -6,9 +6,7 @@ Adaptive screen brightness is common on nearly all modern mobile devices, but it
 
 This tool provides an easy way to automatically adjust your monitor brightness based on the illuminance of your environment.
 
-
 <img src="/screenshots/main.png" alt="main-window" width="50%">
-<img src="/screenshots/curve-editor.png" alt="curve-editor" width="50%">
 
 ## Features
 
@@ -18,6 +16,8 @@ This tool provides an easy way to automatically adjust your monitor brightness b
 - Runs in the Windows system tray
 - Supports optional startup with Windows
 - Stores the Home Assistant token securely for the current Windows user
+- Supports Dark/Light Theme based on global Windows Setting
+- Optional auto update check
 
 ## Setup
 
