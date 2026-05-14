@@ -5,62 +5,105 @@ namespace SolarMonitorBrightness;
 
 internal static class MonitorBrightnessController
 {
-    public static MonitorBrightnessResult SetBrightnessForAllMonitors(int brightness)
+    public static List<DetectedMonitor> GetMonitors()
     {
-        brightness = Math.Clamp(brightness, 1, 100);
+        var monitors = new List<DetectedMonitor>();
+        EnumeratePhysicalMonitors((monitor, _) => monitors.Add(monitor));
+        return monitors;
+    }
+
+    public static MonitorBrightnessResult SetBrightnessForAllMonitors(Func<DetectedMonitor, int> brightnessSelector)
+    {
         var result = new MonitorBrightnessResult();
-        var monitors = new List<IntPtr>();
+        EnumeratePhysicalMonitors((monitor, handle) =>
+        {
+            var brightness = Math.Clamp(brightnessSelector(monitor), 1, 100);
+            if (SetMonitorBrightness(handle, (uint)brightness))
+            {
+                result.Changed++;
+                result.AppliedBrightnessValues.Add(brightness);
+            }
+            else
+            {
+                result.Failed++;
+            }
+        });
+
+        return result;
+    }
+
+    private static void EnumeratePhysicalMonitors(Action<DetectedMonitor, IntPtr> action)
+    {
+        var displayMonitors = new List<IntPtr>();
 
         if (!EnumDisplayMonitors(IntPtr.Zero, IntPtr.Zero, (IntPtr hMonitor, IntPtr hdcMonitor, ref Rect monitorBounds, IntPtr data) =>
             {
-                monitors.Add(hMonitor);
+                displayMonitors.Add(hMonitor);
                 return true;
             }, IntPtr.Zero))
         {
             throw new Win32Exception(Marshal.GetLastWin32Error(), "Monitors could not be enumerated.");
         }
 
-        foreach (var monitor in monitors)
+        var globalIndex = 0;
+        foreach (var displayMonitor in displayMonitors)
         {
-            ApplyToMonitor(monitor, (uint)brightness, result);
-        }
-
-        return result;
-    }
-
-    private static void ApplyToMonitor(IntPtr monitor, uint brightness, MonitorBrightnessResult result)
-    {
-        if (!GetNumberOfPhysicalMonitorsFromHMONITOR(monitor, out var count) || count == 0)
-        {
-            result.Failed++;
-            return;
-        }
-
-        var physicalMonitors = new PhysicalMonitor[count];
-        if (!GetPhysicalMonitorsFromHMONITOR(monitor, count, physicalMonitors))
-        {
-            result.Failed += (int)count;
-            return;
-        }
-
-        try
-        {
-            foreach (var physicalMonitor in physicalMonitors)
+            var deviceName = GetDisplayDeviceName(displayMonitor);
+            if (!GetNumberOfPhysicalMonitorsFromHMONITOR(displayMonitor, out var count) || count == 0)
             {
-                if (SetMonitorBrightness(physicalMonitor.Handle, brightness))
+                continue;
+            }
+
+            var physicalMonitors = new PhysicalMonitor[count];
+            if (!GetPhysicalMonitorsFromHMONITOR(displayMonitor, count, physicalMonitors))
+            {
+                continue;
+            }
+
+            try
+            {
+                for (var index = 0; index < physicalMonitors.Length; index++)
                 {
-                    result.Changed++;
-                }
-                else
-                {
-                    result.Failed++;
+                    var description = physicalMonitors[index].Description?.Trim();
+                    if (string.IsNullOrWhiteSpace(description))
+                    {
+                        description = "DDC/CI monitor";
+                    }
+
+                    var key = $"{deviceName}|{description}|{index}";
+                    var displayName = $"{description} ({deviceName})";
+                    if (string.IsNullOrWhiteSpace(deviceName))
+                    {
+                        key = $"{description}|{globalIndex}";
+                        displayName = description;
+                    }
+
+                    action(new DetectedMonitor
+                    {
+                        Key = key,
+                        DisplayName = displayName,
+                        DeviceName = deviceName,
+                        Description = description
+                    }, physicalMonitors[index].Handle);
+                    globalIndex++;
                 }
             }
+            finally
+            {
+                DestroyPhysicalMonitors(count, physicalMonitors);
+            }
         }
-        finally
+    }
+
+    private static string GetDisplayDeviceName(IntPtr monitor)
+    {
+        var info = new MonitorInfoEx
         {
-            DestroyPhysicalMonitors(count, physicalMonitors);
-        }
+            Size = Marshal.SizeOf<MonitorInfoEx>(),
+            DeviceName = new string('\0', 32)
+        };
+
+        return GetMonitorInfo(monitor, ref info) ? info.DeviceName.TrimEnd('\0') : "";
     }
 
     private delegate bool MonitorEnumDelegate(IntPtr hMonitor, IntPtr hdcMonitor, ref Rect lprcMonitor, IntPtr dwData);
@@ -71,6 +114,9 @@ internal static class MonitorBrightnessController
         IntPtr lprcClip,
         MonitorEnumDelegate lpfnEnum,
         IntPtr dwData);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MonitorInfoEx lpmi);
 
     [DllImport("dxva2.dll", SetLastError = true)]
     private static extern bool GetNumberOfPhysicalMonitorsFromHMONITOR(IntPtr hMonitor, out uint pdwNumberOfPhysicalMonitors);
@@ -99,6 +145,18 @@ internal static class MonitorBrightnessController
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct MonitorInfoEx
+    {
+        public int Size;
+        public Rect Monitor;
+        public Rect WorkArea;
+        public uint Flags;
+
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string DeviceName;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     private struct PhysicalMonitor
     {
         public IntPtr Handle;
@@ -108,8 +166,17 @@ internal static class MonitorBrightnessController
     }
 }
 
+internal sealed class DetectedMonitor
+{
+    public string Key { get; set; } = "";
+    public string DisplayName { get; set; } = "";
+    public string DeviceName { get; set; } = "";
+    public string Description { get; set; } = "";
+}
+
 internal sealed class MonitorBrightnessResult
 {
     public int Changed { get; set; }
     public int Failed { get; set; }
+    public List<int> AppliedBrightnessValues { get; } = [];
 }

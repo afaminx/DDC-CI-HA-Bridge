@@ -4,9 +4,9 @@
     <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0-windows</TargetFramework>
     <AssemblyName>DDC-CI HA-Bridge</AssemblyName>
-    <Version>1.3.0</Version>
-    <AssemblyVersion>1.3.0.0</AssemblyVersion>
-    <FileVersion>1.3.0.0</FileVersion>
+    <Version>1.4.0</Version>
+    <AssemblyVersion>1.4.0.0</AssemblyVersion>
+    <FileVersion>1.4.0.0</FileVersion>
     <Product>DDC/CI HA-Bridge</Product>
     <FileDescription>DDC/CI HA-Bridge</FileDescription>
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>

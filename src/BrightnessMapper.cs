@@ -2,27 +2,41 @@ namespace SolarMonitorBrightness;
 
 internal static class BrightnessMapper
 {
-    public static int MapLuxToBrightness(decimal lux, AppSettings settings)
+    public static int MapLuxToBrightness(decimal lux, BrightnessCurve curve, decimal referenceLux)
     {
-        var minLux = settings.LuxAtMinimumBrightness;
-        var maxLux = settings.LuxAtMaximumBrightness;
-        var minBrightness = Math.Clamp(settings.MinimumMonitorBrightness, 1, 100);
-        var maxBrightness = Math.Clamp(settings.MaximumMonitorBrightness, 1, 100);
+        curve.Normalize(referenceLux);
+        var points = curve.Points;
+        var luxPercent = Math.Clamp(lux / Math.Clamp(referenceLux, 1, 1000000) * 100, 0, 100);
 
-        if (minBrightness > maxBrightness)
+        if (luxPercent <= points[0].Lux)
         {
-            (minBrightness, maxBrightness) = (maxBrightness, minBrightness);
+            return Math.Clamp(points[0].Brightness, 1, 100);
         }
 
-        if (minLux == maxLux)
+        if (luxPercent >= points[^1].Lux)
         {
-            return Math.Clamp(minBrightness, 1, 100);
+            return Math.Clamp(points[^1].Brightness, 1, 100);
         }
 
-        var position = (lux - minLux) / (maxLux - minLux);
-        position = Math.Clamp(position, 0, 1);
+        for (var index = 0; index < points.Count - 1; index++)
+        {
+            var left = points[index];
+            var right = points[index + 1];
+            if (luxPercent < left.Lux || luxPercent > right.Lux)
+            {
+                continue;
+            }
 
-        var brightness = minBrightness + position * (maxBrightness - minBrightness);
-        return Math.Clamp((int)Math.Round(brightness, MidpointRounding.AwayFromZero), 1, 100);
+            if (left.Lux == right.Lux)
+            {
+                return Math.Clamp(right.Brightness, 1, 100);
+            }
+
+            var position = (luxPercent - left.Lux) / (right.Lux - left.Lux);
+            var brightness = left.Brightness + position * (right.Brightness - left.Brightness);
+            return Math.Clamp((int)Math.Round(brightness, MidpointRounding.AwayFromZero), 1, 100);
+        }
+
+        return Math.Clamp(points[^1].Brightness, 1, 100);
     }
 }

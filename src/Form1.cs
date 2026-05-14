@@ -3,7 +3,7 @@ namespace SolarMonitorBrightness;
 public partial class Form1 : Form
 {
     private const string AppTitle = "DDC/CI HA-Bridge";
-    private const string AppVersion = "1.3";
+    private const string AppVersion = "1.4";
 
     private readonly bool _startHidden;
     private readonly HomeAssistantClient _homeAssistant = new();
@@ -270,12 +270,28 @@ public partial class Form1 : Form
 
     private void ShowBrightnessSettings()
     {
+        var availableMonitors = new List<DetectedMonitor>();
+        try
+        {
+            availableMonitors = MonitorBrightnessController.GetMonitors();
+        }
+        catch
+        {
+            availableMonitors = [];
+        }
+
+        var defaultCurve = _settings.DefaultCurve.Clone();
+        var monitorCurves = _settings.MonitorCurves.Select(curve => curve.Clone()).ToList();
+        var referenceLux = _settings.ReferenceLux;
+        var selectedKey = "";
+        var loading = false;
+
         using var dialog = new Form
         {
             Text = "Brightness control settings",
             Icon = _appIcon,
-            ClientSize = new Size(520, 355),
-            MinimumSize = new Size(520, 395),
+            ClientSize = new Size(760, 620),
+            MinimumSize = new Size(760, 660),
             StartPosition = FormStartPosition.CenterParent,
             FormBorderStyle = FormBorderStyle.FixedDialog,
             MaximizeBox = false,
@@ -286,30 +302,233 @@ public partial class Form1 : Form
         var startWithWindowsBox = new CheckBox { Text = "Start with Windows", Checked = IsStartupEnabled(), AutoSize = true };
         var startMinimizedBox = new CheckBox { Text = "Start minimized to tray", Checked = _settings.StartMinimized, AutoSize = true };
         var pollingSecondsBox = CreateNumberBox(5, 3600, 1, Math.Clamp(_settings.PollingSeconds, 5, 3600));
-        var luxAtMinimumBox = CreateNumberBox(0, 10000000, 1000, _settings.LuxAtMinimumBrightness);
-        var luxAtMaximumBox = CreateNumberBox(0, 10000000, 1000, _settings.LuxAtMaximumBrightness);
-        var minimumBrightnessBox = CreateNumberBox(1, 100, 1, Math.Clamp(_settings.MinimumMonitorBrightness, 1, 100));
-        var maximumBrightnessBox = CreateNumberBox(1, 100, 1, Math.Clamp(_settings.MaximumMonitorBrightness, 1, 100));
+        var referenceLuxBox = CreateNumberBox(1, 1000000, 1000, referenceLux);
+        var monitorBox = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 430 };
+        var customCurveBox = new CheckBox { Text = "Use custom graph for this monitor", AutoSize = true };
+        var editor = new CurveEditorControl { Size = new Size(700, 320), Anchor = AnchorStyles.Left | AnchorStyles.Right, ReferenceLux = referenceLux };
+        var selectedLuxBox = CreateNumberBox(0, referenceLux, 100, 0);
+        var selectedBrightnessBox = CreateNumberBox(1, 100, 1, 1);
+        var addPointButton = new Button { Text = "Add point", AutoSize = true };
+        var removePointButton = new Button { Text = "Remove point", AutoSize = true };
+        var resetGraphButton = new Button { Text = "Reset graph", AutoSize = true };
 
-        var grid = CreateDialogGrid();
-        AddRow(grid, "Polling interval (seconds)", pollingSecondsBox);
-        AddRow(grid, "Lux at minimum brightness", luxAtMinimumBox);
-        AddRow(grid, "Lux at maximum brightness", luxAtMaximumBox);
-        AddRow(grid, "Minimum brightness (%)", minimumBrightnessBox);
-        AddRow(grid, "Maximum brightness (%)", maximumBrightnessBox);
-        AddRow(grid, "", enabledBox);
-        AddRow(grid, "", startWithWindowsBox);
-        AddRow(grid, "", startMinimizedBox);
+        monitorBox.Items.Add(new MonitorSelectionItem("Default graph", "", isDefault: true));
+        foreach (var monitor in availableMonitors)
+        {
+            monitorBox.Items.Add(new MonitorSelectionItem(monitor.DisplayName, monitor.Key, isDefault: false));
+        }
+        monitorBox.SelectedIndex = 0;
+
+        var optionsGrid = CreateTwoColumnGrid(205);
+        optionsGrid.Dock = DockStyle.Top;
+        optionsGrid.Padding = new Padding(14, 14, 14, 0);
+        AddRow(optionsGrid, "Polling interval (seconds)", pollingSecondsBox);
+        AddRow(optionsGrid, "Reference lux", referenceLuxBox);
+        AddRow(optionsGrid, "", enabledBox);
+        AddRow(optionsGrid, "", startWithWindowsBox);
+        AddRow(optionsGrid, "", startMinimizedBox);
+        AddRow(optionsGrid, "Graph target", monitorBox);
+        AddRow(optionsGrid, "", customCurveBox);
+
+        var pointGrid = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            ColumnCount = 7,
+            Padding = new Padding(14, 0, 14, 0)
+        };
+        pointGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        pointGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
+        pointGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        pointGrid.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 120));
+        pointGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        pointGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        pointGrid.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        pointGrid.Controls.Add(new Label { Text = "Selected lux", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0);
+        pointGrid.Controls.Add(selectedLuxBox, 1, 0);
+        pointGrid.Controls.Add(new Label { Text = "Brightness (%)", AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(12, 6, 6, 6) }, 2, 0);
+        pointGrid.Controls.Add(selectedBrightnessBox, 3, 0);
+        pointGrid.Controls.Add(addPointButton, 4, 0);
+        pointGrid.Controls.Add(removePointButton, 5, 0);
+        pointGrid.Controls.Add(resetGraphButton, 6, 0);
+
+        var body = new TableLayoutPanel
+        {
+            Dock = DockStyle.Top,
+            AutoSize = true,
+            ColumnCount = 1
+        };
+        body.Controls.Add(optionsGrid);
+        body.Controls.Add(editor);
+        body.Controls.Add(pointGrid);
+
+        MonitorCurveSettings GetOrCreateMonitorCurve(string monitorKey)
+        {
+            var monitor = availableMonitors.FirstOrDefault(item => item.Key == monitorKey);
+            var monitorCurve = monitorCurves.FirstOrDefault(item => item.MonitorKey == monitorKey);
+            if (monitorCurve is not null)
+            {
+                if (monitor is not null)
+                {
+                    monitorCurve.DisplayName = monitor.DisplayName;
+                }
+
+                return monitorCurve;
+            }
+
+            monitorCurve = new MonitorCurveSettings
+            {
+                MonitorKey = monitorKey,
+                DisplayName = monitor?.DisplayName ?? monitorKey,
+                Enabled = false,
+                Curve = defaultCurve.Clone()
+            };
+            monitorCurves.Add(monitorCurve);
+            return monitorCurve;
+        }
+
+        void SaveEditorToSelected()
+        {
+            if (loading)
+            {
+                return;
+            }
+
+            if (selectedKey.Length == 0)
+            {
+                defaultCurve = editor.ToCurve();
+                return;
+            }
+
+            var monitorCurve = GetOrCreateMonitorCurve(selectedKey);
+            if (customCurveBox.Checked)
+            {
+                monitorCurve.Enabled = true;
+                monitorCurve.Curve = editor.ToCurve();
+            }
+        }
+
+        void LoadSelectedGraph()
+        {
+            loading = true;
+            if (monitorBox.SelectedItem is not MonitorSelectionItem item || item.IsDefault)
+            {
+                selectedKey = "";
+                customCurveBox.Checked = false;
+                customCurveBox.Enabled = false;
+                editor.Enabled = true;
+                editor.SetPoints(defaultCurve.Points);
+            }
+            else
+            {
+                selectedKey = item.MonitorKey;
+                customCurveBox.Enabled = true;
+                var monitorCurve = GetOrCreateMonitorCurve(selectedKey);
+                customCurveBox.Checked = monitorCurve.Enabled;
+                editor.Enabled = monitorCurve.Enabled;
+                editor.SetPoints(monitorCurve.Enabled ? monitorCurve.Curve.Points : defaultCurve.Points);
+            }
+
+            loading = false;
+        }
+
+        void UpdateSelectedPointFields()
+        {
+            loading = true;
+            if (editor.SelectedPoint is { } point)
+            {
+                selectedLuxBox.Value = Math.Clamp(editor.GetSelectedEffectiveLux(), selectedLuxBox.Minimum, selectedLuxBox.Maximum);
+                selectedBrightnessBox.Value = Math.Clamp(point.Brightness, selectedBrightnessBox.Minimum, selectedBrightnessBox.Maximum);
+            }
+
+            loading = false;
+        }
+
+        monitorBox.SelectedIndexChanged += (_, _) =>
+        {
+            SaveEditorToSelected();
+            LoadSelectedGraph();
+            UpdateSelectedPointFields();
+        };
+        referenceLuxBox.ValueChanged += (_, _) =>
+        {
+            if (loading)
+            {
+                return;
+            }
+
+            SaveEditorToSelected();
+            loading = true;
+            referenceLux = referenceLuxBox.Value;
+            SetNumericMaximumSafely(selectedLuxBox, referenceLux);
+            editor.ReferenceLux = referenceLux;
+            loading = false;
+            UpdateSelectedPointFields();
+        };
+        referenceLuxBox.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode != Keys.Enter)
+            {
+                return;
+            }
+
+            referenceLux = referenceLuxBox.Value;
+            editor.ReferenceLux = referenceLux;
+            SetNumericMaximumSafely(selectedLuxBox, referenceLux);
+            UpdateSelectedPointFields();
+            e.SuppressKeyPress = true;
+            e.Handled = true;
+        };
+        customCurveBox.CheckedChanged += (_, _) =>
+        {
+            if (loading || selectedKey.Length == 0)
+            {
+                return;
+            }
+
+            var monitorCurve = GetOrCreateMonitorCurve(selectedKey);
+            monitorCurve.Enabled = customCurveBox.Checked;
+            editor.Enabled = customCurveBox.Checked;
+            editor.SetPoints(customCurveBox.Checked ? monitorCurve.Curve.Points : defaultCurve.Points);
+            UpdateSelectedPointFields();
+        };
+        editor.PointsChanged += (_, _) => SaveEditorToSelected();
+        editor.SelectedPointChanged += (_, _) => UpdateSelectedPointFields();
+        selectedLuxBox.ValueChanged += (_, _) =>
+        {
+            if (!loading && editor.Enabled)
+            {
+                editor.UpdateSelected(selectedLuxBox.Value, (int)selectedBrightnessBox.Value);
+            }
+        };
+        selectedBrightnessBox.ValueChanged += (_, _) =>
+        {
+            if (!loading && editor.Enabled)
+            {
+                editor.UpdateSelected(selectedLuxBox.Value, (int)selectedBrightnessBox.Value);
+            }
+        };
+        addPointButton.Click += (_, _) => editor.AddPoint();
+        removePointButton.Click += (_, _) => editor.RemoveSelectedPoint();
+        resetGraphButton.Click += (_, _) =>
+        {
+            var reset = selectedKey.Length == 0 ? BrightnessCurve.CreateDefault() : defaultCurve.Clone();
+            editor.SetPoints(reset.Points);
+            SaveEditorToSelected();
+        };
+
+        LoadSelectedGraph();
+        UpdateSelectedPointFields();
 
         var buttons = BuildDialogButtons(dialog, () =>
         {
+            SaveEditorToSelected();
             _settings.PollingSeconds = (int)pollingSecondsBox.Value;
-            _settings.LuxAtMinimumBrightness = luxAtMinimumBox.Value;
-            _settings.LuxAtMaximumBrightness = luxAtMaximumBox.Value;
-            _settings.MinimumMonitorBrightness = (int)minimumBrightnessBox.Value;
-            _settings.MaximumMonitorBrightness = (int)maximumBrightnessBox.Value;
             _settings.Enabled = enabledBox.Checked;
             _settings.StartMinimized = startMinimizedBox.Checked;
+            _settings.ReferenceLux = referenceLuxBox.Value;
+            _settings.DefaultCurve = defaultCurve;
+            _settings.MonitorCurves = monitorCurves;
 
             try
             {
@@ -326,8 +545,8 @@ public partial class Form1 : Form
             return true;
         });
         dialog.Controls.Add(buttons);
-        dialog.Controls.Add(grid);
-        FitDialogToContent(dialog, grid, buttons, 520);
+        dialog.Controls.Add(body);
+        FitDialogToContent(dialog, body, buttons, 760);
 
         dialog.ShowDialog(this);
     }
@@ -417,6 +636,17 @@ public partial class Form1 : Form
             ThousandsSeparator = true,
             Width = 145
         };
+    }
+
+    private static void SetNumericMaximumSafely(NumericUpDown numericBox, decimal maximum)
+    {
+        maximum = Math.Max(numericBox.Minimum, maximum);
+        if (numericBox.Value > maximum)
+        {
+            numericBox.Value = maximum;
+        }
+
+        numericBox.Maximum = maximum;
     }
 
     private static void ConfigureStatusLabel(Label label)
@@ -532,15 +762,20 @@ public partial class Form1 : Form
                 _settings.Token,
                 CancellationToken.None);
 
-            var brightness = BrightnessMapper.MapLuxToBrightness(lux, _settings);
+            var previewBrightness = BrightnessMapper.MapLuxToBrightness(lux, _settings.DefaultCurve, _settings.ReferenceLux);
             _luxStatusLabel.Text = $"{lux:N0} lux";
-            _brightnessStatusLabel.Text = $"{brightness}%";
+            _brightnessStatusLabel.Text = $"{previewBrightness}%";
             _messageStatusLabel.Text = "Applying monitor brightness...";
 
-            var result = await Task.Run(() => MonitorBrightnessController.SetBrightnessForAllMonitors(brightness));
+            var result = await Task.Run(() => MonitorBrightnessController.SetBrightnessForAllMonitors(monitor =>
+            {
+                var curve = GetEffectiveCurve(monitor);
+                return BrightnessMapper.MapLuxToBrightness(lux, curve, _settings.ReferenceLux);
+            }));
+            _brightnessStatusLabel.Text = FormatBrightnessValues(result.AppliedBrightnessValues, previewBrightness);
             _monitorStatusLabel.Text = $"{result.Changed} updated, {result.Failed} unavailable";
             _messageStatusLabel.Text = $"Last updated at {DateTime.Now:T}";
-            UpdateTrayText($"{brightness}% at {lux:N0} lux");
+            UpdateTrayText($"{_brightnessStatusLabel.Text} at {lux:N0} lux");
         }
         catch (Exception ex)
         {
@@ -557,6 +792,39 @@ public partial class Form1 : Form
     private void UpdateToggleButton()
     {
         _toggleButton.Text = _settings.Enabled ? "Pause" : "Resume";
+    }
+
+    private BrightnessCurve GetEffectiveCurve(DetectedMonitor monitor)
+    {
+        var monitorCurve = _settings.MonitorCurves.FirstOrDefault(curve =>
+            curve.Enabled &&
+            curve.MonitorKey.Equals(monitor.Key, StringComparison.OrdinalIgnoreCase));
+
+        if (monitorCurve is null && !string.IsNullOrWhiteSpace(monitor.Description))
+        {
+            monitorCurve = _settings.MonitorCurves.FirstOrDefault(curve =>
+                curve.Enabled &&
+                !string.IsNullOrWhiteSpace(curve.DisplayName) &&
+                curve.DisplayName.StartsWith(monitor.Description, StringComparison.OrdinalIgnoreCase));
+        }
+
+        return monitorCurve?.Curve ?? _settings.DefaultCurve;
+    }
+
+    private static string FormatBrightnessValues(IReadOnlyCollection<int> values, int fallback)
+    {
+        if (values.Count == 0)
+        {
+            return $"{fallback}%";
+        }
+
+        var distinct = values.Distinct().Order().ToList();
+        if (distinct.Count == 1)
+        {
+            return $"{distinct[0]}%";
+        }
+
+        return $"{distinct[0]}-{distinct[^1]}% per monitor";
     }
 
     private void UpdateTrayText(string suffix)
@@ -603,5 +871,13 @@ public partial class Form1 : Form
         }
 
         return value;
+    }
+
+    private sealed class MonitorSelectionItem(string text, string monitorKey, bool isDefault)
+    {
+        public string MonitorKey { get; } = monitorKey;
+        public bool IsDefault { get; } = isDefault;
+
+        public override string ToString() => text;
     }
 }
